@@ -94,6 +94,8 @@ func run() error {
 	replace := fs.String("replace", "", "exact credential ID to replace; browser confirmation required")
 	ttl := fs.Duration("ttl", 5*time.Minute, "browser request lifetime, at most 5m")
 	open := fs.Bool("open", true, "open the default browser")
+	listenAddr := fs.String("listen-addr", "", "listen address for browser entry (requires --public-url for non-loopback use)")
+	publicURL := fs.String("public-url", "", "advertised browser origin, for example https://tapas.tailnet.example")
 	asJSON := fs.Bool("json", false, "print JSON even when the output is a terminal (list)")
 	var refs refList
 	fs.Var(&refs, "ref", "credential to deliver as VARIABLE=REF or REF (run; repeatable)")
@@ -147,7 +149,7 @@ func run() error {
 	case "list", "discover":
 		return listCredentials(s, *asJSON)
 	case "serve", "add":
-		server, e := entry.Start(s, entry.Options{Metadata: vault.Metadata{Name: *name, Description: *description, Service: *service, Environment: *environment, SuggestedEnv: *env}, Reason: *reason, Replace: *replace, TTL: *ttl})
+		server, e := entry.Start(s, entry.Options{Metadata: vault.Metadata{Name: *name, Description: *description, Service: *service, Environment: *environment, SuggestedEnv: *env}, Reason: *reason, Replace: *replace, TTL: *ttl, ListenAddr: *listenAddr, PublicURL: *publicURL})
 		if e != nil {
 			return e
 		}
@@ -156,7 +158,7 @@ func run() error {
 		if len(refs) != 1 || refs[0].variable != "" {
 			return errors.New("provide exactly one --ref REF; run tapas list for exact references")
 		}
-		server, e := entry.Start(s, entry.Options{Edit: refs[0].reference, TTL: *ttl})
+		server, e := entry.Start(s, entry.Options{Edit: refs[0].reference, TTL: *ttl, ListenAddr: *listenAddr, PublicURL: *publicURL})
 		if e != nil {
 			return e
 		}
@@ -165,7 +167,7 @@ func run() error {
 		if len(refs) != 1 || refs[0].variable != "" {
 			return errors.New("provide exactly one --ref REF; run tapas list for exact references")
 		}
-		server, e := entry.Start(s, entry.Options{Delete: refs[0].reference, TTL: *ttl})
+		server, e := entry.Start(s, entry.Options{Delete: refs[0].reference, TTL: *ttl, ListenAddr: *listenAddr, PublicURL: *publicURL})
 		if e != nil {
 			return e
 		}

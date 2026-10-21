@@ -121,6 +121,54 @@ func TestCancelAndExpiry(t *testing.T) {
 		})
 	}
 }
+
+func TestPublicOriginCanBeProxiedWithoutChangingLocalBinding(t *testing.T) {
+	s, result := func() (*Server, <-chan Result) {
+		t.Helper()
+		server, e := Start(testutil.Vault(t), Options{TTL: time.Minute, ListenAddr: "127.0.0.1:0", PublicURL: "https://tapas.tailnet.example"})
+		if e != nil {
+			t.Fatal(e)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		out := make(chan Result, 1)
+		go func() { out <- server.Wait(ctx) }()
+		return server, out
+	}()
+	if s.URL()[:len("https://tapas.tailnet.example")] != "https://tapas.tailnet.example" {
+		t.Fatal("public URL was not advertised")
+	}
+	if s.listener.Addr().String() == "0.0.0.0:0" {
+		t.Fatal("listener did not bind an actual local port")
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://"+s.host+"/?token="+s.token, nil)
+	request.Host = "tapas.tailnet.example"
+	request.Header.Set("Origin", "https://tapas.tailnet.example")
+	response := httptest.NewRecorder()
+	s.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Add credential") {
+		t.Fatal("trusted public origin was rejected", response.Code, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodGet, "http://"+s.host+"/?token="+s.token, nil)
+	request.Host = "evil.example"
+	response = httptest.NewRecorder()
+	s.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatal("untrusted host was accepted", response.Code)
+	}
+	if r := <-result; r.Status != "cancelled" {
+		t.Fatal("unexpected terminal result", r)
+	}
+}
+
+func TestNonLoopbackListenerRequiresExplicitPublicOrigin(t *testing.T) {
+	if _, e := Start(testutil.Vault(t), Options{TTL: time.Minute, ListenAddr: "0.0.0.0:8088"}); e == nil || e.Error() != "non-loopback listen address requires public URL" {
+		t.Fatal("unsafe listener was not rejected", e)
+	}
+	if _, e := Start(testutil.Vault(t), Options{TTL: time.Minute, ListenAddr: "127.0.0.1:0", PublicURL: "https://tapas.tailnet.example/path"}); e == nil || e.Error() != "public URL must be an absolute http(s) origin without a path or query" {
+		t.Fatal("invalid public origin was not rejected", e)
+	}
+}
 func TestReplacementRequiresConfirmation(t *testing.T) {
 	s := testutil.Vault(t)
 	snap, _ := s.Discover()

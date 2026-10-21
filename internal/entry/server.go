@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -39,26 +40,31 @@ type Result struct {
 	Error  string `json:"error,omitempty"`
 }
 type Options struct {
-	Metadata vault.Metadata
-	Reason   string
-	Replace  string
-	Edit     string
-	Delete   string
-	TTL      time.Duration
+	Metadata   vault.Metadata
+	Reason     string
+	Replace    string
+	Edit       string
+	Delete     string
+	TTL        time.Duration
+	ListenAddr string
+	PublicURL  string
 }
 type Server struct {
-	store      *vault.Store
-	snapshot   vault.Snapshot
-	options    Options
-	targetName string
-	token      string
-	host       string
-	expires    time.Time
-	mu         sync.Mutex
-	finished   bool
-	result     chan Result
-	http       *http.Server
-	listener   net.Listener
+	store          *vault.Store
+	snapshot       vault.Snapshot
+	options        Options
+	targetName     string
+	token          string
+	host           string
+	expectedHost   string
+	expectedOrigin string
+	publicURL      string
+	expires        time.Time
+	mu             sync.Mutex
+	finished       bool
+	result         chan Result
+	http           *http.Server
+	listener       net.Listener
 }
 
 func Start(store *vault.Store, o Options) (*Server, error) {
@@ -95,12 +101,41 @@ func Start(store *vault.Store, o Options) (*Server, error) {
 		s.targetName = m.Name
 		s.options.Metadata = m
 	}
-	l, e := net.Listen("tcp4", "127.0.0.1:0")
+	listenAddr := o.ListenAddr
+	if listenAddr == "" {
+		listenAddr = "127.0.0.1:0"
+	}
+	if o.PublicURL == "" && o.ListenAddr != "" && !strings.HasPrefix(o.ListenAddr, "127.0.0.1:") {
+		return nil, errors.New("non-loopback listen address requires public URL")
+	}
+	publicURL := ""
+	expectedHost := ""
+	expectedOrigin := ""
+	if o.PublicURL != "" {
+		u, parseErr := url.Parse(o.PublicURL)
+		if parseErr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+			return nil, errors.New("public URL must be an absolute http(s) origin without a path or query")
+		}
+		if o.ListenAddr == "" {
+			return nil, errors.New("listen address is required with public URL")
+		}
+		publicURL = strings.TrimRight(o.PublicURL, "/")
+		expectedHost = u.Host
+		expectedOrigin = u.Scheme + "://" + u.Host
+	}
+	l, e := net.Listen("tcp4", listenAddr)
 	if e != nil {
-		return nil, errors.New("cannot bind loopback server")
+		return nil, errors.New("cannot bind entry server")
 	}
 	s.listener = l
 	s.host = l.Addr().String()
+	if expectedHost == "" {
+		expectedHost = s.host
+		expectedOrigin = "http://" + s.host
+	}
+	s.expectedHost = expectedHost
+	s.expectedOrigin = expectedOrigin
+	s.publicURL = publicURL
 	s.http = &http.Server{Handler: s, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 40 * time.Second, IdleTimeout: 5 * time.Second, MaxHeaderBytes: 8192, ErrorLog: log.New(io.Discard, "", 0)}
 	go func() {
 		if e := s.http.Serve(l); e != nil && !errors.Is(e, http.ErrServerClosed) {
@@ -125,7 +160,13 @@ func firstNonempty(values ...string) string {
 	}
 	return ""
 }
-func (s *Server) URL() string        { return "http://" + s.host + "/?token=" + s.token }
+func (s *Server) URL() string {
+	base := s.publicURL
+	if base == "" {
+		base = "http://" + s.host
+	}
+	return base + "/?token=" + s.token
+}
 func (s *Server) Expires() time.Time { return s.expires }
 func (s *Server) finish(r Result) {
 	s.mu.Lock()
@@ -163,11 +204,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Referrer-Policy", "origin")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'self' 'nonce-"+s.token+"'; script-src 'nonce-"+s.token+"'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
-	if r.Host != s.host {
+	if r.Host != s.expectedHost {
 		http.Error(w, "Invalid host", http.StatusForbidden)
 		return
 	}
-	if origin := r.Header.Get("Origin"); origin != "" && origin != "http://"+s.host {
+	if origin := r.Header.Get("Origin"); origin != "" && origin != s.expectedOrigin {
 		http.Error(w, "Invalid origin", http.StatusForbidden)
 		return
 	}
@@ -207,7 +248,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
-	if r.Header.Get("Origin") != "http://"+s.host {
+	if r.Header.Get("Origin") != s.expectedOrigin {
 		http.Error(w, "Origin required", http.StatusForbidden)
 		return
 	}
